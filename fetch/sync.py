@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,44 +27,96 @@ from dotenv import load_dotenv
 # Load .env from project root (parent of fetch/)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+OUTPUT_DIR = Path(__file__).parent.parent / "public" / "data"
+
+
+def write_sync_status(status: str, message: str, **extra) -> None:
+    """Write sync_status.json so the UI can show progress / errors."""
+    payload = {
+        "status": status,  # running | ok | error
+        "message": message,
+        "updatedAt": datetime.now().isoformat(),
+        **extra,
+    }
+    try:
+        save_json(OUTPUT_DIR / "sync_status.json", payload)
+    except OSError as e:
+        print(f"WARNING: could not write sync_status.json: {e}")
+
 
 def get_api():
     """Authenticate and return a Garmin Connect API client."""
     try:
         import garminconnect
-    except ImportError:
-        print("ERROR: garminconnect not installed. Run: pip install -r requirements.txt")
-        sys.exit(1)
+    except ImportError as e:
+        raise RuntimeError(
+            "garminconnect not installed. Run: pip install -r requirements.txt"
+        ) from e
 
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASSWORD")
 
     if not email or not password:
-        print("ERROR: Set GARMIN_EMAIL and GARMIN_PASSWORD in .env (copy from .env.example)")
-        sys.exit(1)
+        raise RuntimeError(
+            "Set GARMIN_EMAIL and GARMIN_PASSWORD in .env (copy from .env.example)"
+        )
 
     api = garminconnect.Garmin(email, password)
     try:
         api.login()
     except garminconnect.GarminConnectAuthenticationError as e:
-        print(f"Authentication failed: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"Authentication failed: {e}") from e
     except Exception as e:
-        print(f"Login error: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"Login error: {e}") from e
 
     print(f"Logged in as {email}")
     return api
 
 
-def fetch_activities(api, limit: int | None, since: str | None) -> list:
-    """Download the activity list from Garmin Connect."""
+def load_known_ids(output_dir: Path) -> set[int]:
+    """Return activity IDs already present in activities.json."""
+    path = output_dir / "activities.json"
+    if not path.exists():
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return {int(a["id"]) for a in data if a.get("id") is not None}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return set()
+
+
+def load_existing_summaries(output_dir: Path) -> list:
+    """Load previously saved activity summaries, or [] if missing/corrupt."""
+    path = output_dir / "activities.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def fetch_activities(
+    api,
+    limit: int | None,
+    since: str | None,
+    known_ids: set[int] | None = None,
+) -> list:
+    """Download the activity list from Garmin Connect.
+
+    Without --limit, pagination stops once a full batch of activities is
+    already present in activities.json (incremental sync).
+    """
     print("Fetching activity list...")
+    known_ids = known_ids or set()
 
     if limit:
         raw = api.get_activities(0, limit)
     else:
-        # Paginate through all activities in chunks of 100
+        # Paginate through activities in chunks of 100 (newest first)
         raw = []
         start = 0
         chunk = 100
@@ -73,6 +126,12 @@ def fetch_activities(api, limit: int | None, since: str | None) -> list:
                 break
             raw.extend(batch)
             print(f"  Fetched {len(raw)} activities so far...")
+            if known_ids and all(
+                a.get("activityId") is not None and int(a["activityId"]) in known_ids
+                for a in batch
+            ):
+                print("  Reached already-synced activities, stopping pagination.")
+                break
             if len(batch) < chunk:
                 break
             start += chunk
@@ -82,7 +141,7 @@ def fetch_activities(api, limit: int | None, since: str | None) -> list:
     if since:
         raw = [a for a in raw if (a.get("startTimeLocal") or "") >= since]
 
-    print(f"Total activities: {len(raw)}")
+    print(f"Total activities fetched this run: {len(raw)}")
     return raw
 
 
@@ -154,59 +213,109 @@ def main():
 
     from normalizer import normalize_summary, normalize_detail
 
-    output_dir = Path(__file__).parent.parent / "public" / "data"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = OUTPUT_DIR
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"ERROR: cannot write to {output_dir}: {e}")
+        print("Hint: Docker volume permissions — rebuild with the latest entrypoint.")
+        sys.exit(1)
 
-    api = get_api()
+    write_sync_status("running", "Iniciando sesión en Garmin Connect...")
 
-    # Step 1: Get activity list
-    raw_activities = fetch_activities(api, args.limit, args.since)
+    try:
+        api = get_api()
+    except Exception as e:
+        print(f"ERROR: {e}")
+        write_sync_status("error", str(e))
+        sys.exit(1)
 
-    # Step 2: Normalize summaries
-    summaries = []
-    for raw in raw_activities:
-        try:
-            s = normalize_summary(raw)
-            if s.get("id"):
-                summaries.append(s)
-        except Exception as e:
-            print(f"  WARNING: Failed to normalize activity {raw.get('activityId')}: {e}")
+    try:
+        # Step 1: Get activity list (incremental unless --limit is set)
+        write_sync_status("running", "Descargando lista de actividades...")
+        known_ids = set() if args.limit else load_known_ids(output_dir)
+        if known_ids:
+            print(f"Found {len(known_ids)} activities already on disk")
+        raw_activities = fetch_activities(api, args.limit, args.since, known_ids=known_ids)
 
-    # Save summary list immediately so the app can start loading
-    save_json(output_dir / "activities.json", summaries)
-    print(f"Saved {len(summaries)} activity summaries → public/data/activities.json")
+        # Step 2: Normalize summaries from this run
+        new_summaries = []
+        for raw in raw_activities:
+            try:
+                s = normalize_summary(raw)
+                if s.get("id"):
+                    new_summaries.append(s)
+            except Exception as e:
+                print(f"  WARNING: Failed to normalize activity {raw.get('activityId')}: {e}")
 
-    # Step 3: Fetch and save details for each activity
-    print(f"\nFetching details for {len(summaries)} activities (rate-limited)...")
-    for i, summary in enumerate(summaries):
-        activity_id = summary["id"]
-        detail_path = output_dir / f"activity_{activity_id}.json"
+        # Merge with existing list so incremental runs keep older activities
+        if args.limit:
+            summaries = new_summaries
+        else:
+            by_id = {s["id"]: s for s in load_existing_summaries(output_dir) if s.get("id")}
+            for s in new_summaries:
+                by_id[s["id"]] = s
+            summaries = list(by_id.values())
 
-        if detail_path.exists():
-            print(f"  [{i+1}/{len(summaries)}] {activity_id} — already cached, skipping")
-            continue
+        summaries.sort(key=lambda s: s.get("startTime") or "", reverse=True)
 
-        print(f"  [{i+1}/{len(summaries)}] Fetching {activity_id} ({summary.get('title', '')})...")
+        # Save summary list immediately so the app can start loading
+        save_json(output_dir / "activities.json", summaries)
+        print(f"Saved {len(summaries)} activity summaries → public/data/activities.json")
+        write_sync_status(
+            "running",
+            f"Listado guardado ({len(summaries)} actividades). Descargando detalles...",
+            activityCount=len(summaries),
+        )
 
-        details = fetch_activity_details(api, activity_id)
-        hr_zones = fetch_activity_hr_zones(api, activity_id)
-        splits = fetch_activity_splits(api, activity_id)
-        gpx_coords = [] if args.no_gpx else fetch_gpx_coords(api, activity_id)
+        # Step 3: Fetch and save details for each activity
+        print(f"\nFetching details for {len(summaries)} activities (rate-limited)...")
+        pending = [s for s in summaries if not (output_dir / f"activity_{s['id']}.json").exists()]
+        for i, summary in enumerate(summaries):
+            activity_id = summary["id"]
+            detail_path = output_dir / f"activity_{activity_id}.json"
 
-        try:
-            full = normalize_detail(summary, details, hr_zones, splits, gpx_coords)
-            save_json(detail_path, full)
-        except Exception as e:
-            print(f"  WARNING: Failed to process detail for {activity_id}: {e}")
+            if detail_path.exists():
+                print(f"  [{i+1}/{len(summaries)}] {activity_id} — already cached, skipping")
+                continue
 
-        # Rate limiting — critical to avoid Garmin banning the account
-        time.sleep(0.5)
+            print(f"  [{i+1}/{len(summaries)}] Fetching {activity_id} ({summary.get('title', '')})...")
+            write_sync_status(
+                "running",
+                f"Detalle {i+1}/{len(summaries)}: {summary.get('title') or activity_id}",
+                activityCount=len(summaries),
+                pendingDetails=len(pending),
+            )
 
-    # Step 4: Compute and save global stats
-    stats = compute_stats(summaries)
-    save_json(output_dir / "stats.json", stats)
-    print(f"\nDone! Saved stats → public/data/stats.json")
-    print("Run 'npm run dev' to open the app.")
+            details = fetch_activity_details(api, activity_id)
+            hr_zones = fetch_activity_hr_zones(api, activity_id)
+            splits = fetch_activity_splits(api, activity_id)
+            gpx_coords = [] if args.no_gpx else fetch_gpx_coords(api, activity_id)
+
+            try:
+                full = normalize_detail(summary, details, hr_zones, splits, gpx_coords)
+                save_json(detail_path, full)
+            except Exception as e:
+                print(f"  WARNING: Failed to process detail for {activity_id}: {e}")
+
+            # Rate limiting — critical to avoid Garmin banning the account
+            time.sleep(0.5)
+
+        # Step 4: Compute and save global stats
+        stats = compute_stats(summaries)
+        save_json(output_dir / "stats.json", stats)
+        write_sync_status(
+            "ok",
+            f"Sincronización completada ({len(summaries)} actividades)",
+            activityCount=len(summaries),
+            syncedAt=stats["syncedAt"],
+        )
+        print(f"\nDone! Saved stats → public/data/stats.json")
+        print("Open the app (Docker: http://<host>:8787) or run 'npm run dev'.")
+    except Exception as e:
+        print(f"ERROR during sync: {e}")
+        write_sync_status("error", str(e))
+        sys.exit(1)
 
 
 def compute_stats(summaries: list) -> dict:

@@ -14,11 +14,24 @@ import PerformanceAnalysis from './pages/PerformanceAnalysis'
 export default function App() {
   const loadActivities = useActivityStore(s => s.loadActivities)
   const loadStats = useActivityStore(s => s.loadStats)
+  const loadSyncStatus = useActivityStore(s => s.loadSyncStatus)
+  const pollForUpdates = useActivityStore(s => s.pollForUpdates)
+  const activityCount = useActivityStore(s => s.activities.length)
 
   useEffect(() => {
     loadActivities()
     loadStats()
-  }, [loadActivities, loadStats])
+    loadSyncStatus()
+  }, [loadActivities, loadStats, loadSyncStatus])
+
+  // While empty, poll often so the first sync shows up; otherwise every 60s.
+  useEffect(() => {
+    const intervalMs = activityCount === 0 ? 5_000 : 60_000
+    const id = window.setInterval(() => {
+      void pollForUpdates()
+    }, intervalMs)
+    return () => window.clearInterval(id)
+  }, [pollForUpdates, activityCount])
 
   return (
     <BrowserRouter>

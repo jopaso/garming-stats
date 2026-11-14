@@ -26,16 +26,42 @@ function LoadingScreen() {
   )
 }
 
-function EmptyScreen() {
+function EmptyScreen({ syncMessage, syncStatus }: { syncMessage?: string; syncStatus?: string }) {
+  const isRunning = syncStatus === 'running'
+  const isError = syncStatus === 'error'
+
   return (
     <div className="flex-1 p-8 max-w-2xl">
-      <div className="bg-amber-950/40 border border-amber-800/50 rounded-xl p-6">
-        <h2 className="text-amber-300 font-medium text-lg mb-2">Sin datos de Garmin</h2>
-        <div className="bg-slate-900 rounded-lg p-4 font-mono text-sm text-slate-300 space-y-1 mt-3">
-          <div>cp .env.example .env</div>
-          <div>cd fetch && pip install -r requirements.txt</div>
-          <div>python3 sync.py --limit 20</div>
-        </div>
+      <div className={`border rounded-xl p-6 ${
+        isError
+          ? 'bg-red-950/40 border-red-800/50'
+          : isRunning
+            ? 'bg-sky-950/40 border-sky-800/50'
+            : 'bg-amber-950/40 border-amber-800/50'
+      }`}>
+        <h2 className={`font-medium text-lg mb-2 ${
+          isError ? 'text-red-300' : isRunning ? 'text-sky-300' : 'text-amber-300'
+        }`}>
+          {isError ? 'Error al sincronizar' : isRunning ? 'Sincronizando con Garmin…' : 'Sin datos de Garmin'}
+        </h2>
+        {syncMessage && (
+          <p className="text-sm text-slate-300 mb-4">{syncMessage}</p>
+        )}
+        {isRunning && (
+          <p className="text-xs text-slate-500 mb-4">
+            La primera descarga puede tardar varios minutos. Esta pantalla se actualizará sola.
+          </p>
+        )}
+        {(isError || !syncStatus) && (
+          <>
+            <p className="text-sm text-slate-400 mb-2">En la Raspberry (Docker):</p>
+            <div className="bg-slate-900 rounded-lg p-4 font-mono text-sm text-slate-300 space-y-1">
+              <div>docker compose logs -f</div>
+              <div># Comprueba GARMIN_EMAIL y GARMIN_PASSWORD en .env</div>
+              <div>docker compose up -d --build</div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -46,6 +72,7 @@ function EmptyScreen() {
 export default function Dashboard() {
   const activities = useActivityStore(s => s.activities)
   const stats = useActivityStore(s => s.stats)
+  const syncStatus = useActivityStore(s => s.syncStatus)
   const loading = useActivityStore(s => s.loading)
   const error = useActivityStore(s => s.error)
 
@@ -56,8 +83,15 @@ export default function Dashboard() {
   const { slices: zoneSlices, isAerobicFocused } = useZoneDistribution(30)
   const weeklyLoad = useWeeklyLoad(16)
 
-  if (loading) return <LoadingScreen />
-  if (error || activities.length === 0) return <EmptyScreen />
+  if (loading && activities.length === 0 && !syncStatus) return <LoadingScreen />
+  if (error || activities.length === 0) {
+    return (
+      <EmptyScreen
+        syncStatus={syncStatus?.status}
+        syncMessage={syncStatus?.message ?? error ?? undefined}
+      />
+    )
+  }
 
   const tsb = fitness?.tsb ?? 0
   const ctl = fitness?.ctl ?? 0

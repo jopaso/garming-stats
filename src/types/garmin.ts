@@ -68,6 +68,15 @@ export interface GlobalStats {
   syncedAt: string
 }
 
+export interface SyncStatus {
+  status: 'running' | 'ok' | 'error'
+  message: string
+  updatedAt: string
+  activityCount?: number
+  pendingDetails?: number
+  syncedAt?: string
+}
+
 export interface UserSettings {
   maxHR: number
   ftp: number          // Functional Threshold Power (watts)

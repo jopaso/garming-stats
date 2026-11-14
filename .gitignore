@@ -12,6 +12,17 @@ dist
 dist-ssr
 *.local
 
+# Local Python venv (do not commit)
+bin/
+lib/
+lib64/
+include/
+share/
+mi_entorno/
+pyvenv.cfg
+__pycache__/
+*.py[cod]
+
 # Credenciales de Garmin (NUNCA subir)
 .env
 .env.local
@@ -26,6 +37,7 @@ dist/data/**
 
 # Tokens de sesión de Garmin (por si se copian al proyecto)
 .garth/
+data/garth/
 
 # Editor directories and files
 .vscode/*

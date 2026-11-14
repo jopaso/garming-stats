@@ -1,0 +1,22 @@
+services:
+  garmin-stats:
+    build: .
+    container_name: garmin-stats
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      SYNC_INTERVAL_SECONDS: "900"
+      PORT: "8787"
+      HOST: "0.0.0.0"
+    # Docker on Raspberry Pi often fails to resolve external hosts (Garmin SSO).
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      # Use the host folder so data you already downloaded is visible
+      - ./public/data:/app/public/data
+      # Session tokens (login cache)
+      - ./data/garth:/home/app/.garth

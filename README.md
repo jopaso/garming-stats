@@ -2,64 +2,97 @@
 
 Panel personal para ver tus estadísticas de entrenamiento de Garmin Connect: actividades, mapas, zonas de FC, fitness (CTL/ATL/TSB), récords y más.
 
-Los datos se descargan de tu cuenta de Garmin a archivos locales en tu ordenador. La app los lee desde ahí; no hay servidor en la nube ni base de datos.
+Los datos se descargan de tu cuenta de Garmin a archivos JSON. La app los lee desde ahí; no hay servidor en la nube ni base de datos de terceros.
 
 ---
 
-## Qué necesitas antes de empezar
+## Despliegue en Raspberry Pi (Docker)
 
-Instala estas dos cosas si no las tienes ya:
+La forma recomendada: un contenedor que sirve la web y sincroniza Garmin **cada 15 minutos**. Accede desde el móvil o el portátil por **VPN** (WireGuard, Tailscale…); no abras el puerto en el router.
 
+### Requisitos
 
-| Programa                      | Para qué sirve            | Cómo comprobarlo                             |
-| ----------------------------- | ------------------------- | -------------------------------------------- |
-| **Node.js** (v18 o superior)  | Ejecutar la app web       | Abre una terminal y escribe `node --version` |
-| **Python** (v3.10 o superior) | Descargar datos de Garmin | Escribe `python3 --version`                  |
+| Qué | Notas |
+| --- | --- |
+| **Raspberry Pi OS 64 bits** | Necesario: la librería `garminconnect` no va bien en 32 bits |
+| **Docker** + **Docker Compose** | [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) |
+| **Cuenta Garmin Connect** | La misma del móvil / [connect.garmin.com](https://connect.garmin.com) |
+| **VPN** | Para abrir la app fuera de casa sin exponer el puerto |
 
+### Pasos
 
-También necesitas una **cuenta de Garmin Connect** (la misma que usas en la app del móvil o en [connect.garmin.com](https://connect.garmin.com)).
-
-> **¿No tienes Node.js o Python?**
->
-> - Node.js: [https://nodejs.org](https://nodejs.org) → descarga la versión LTS.
-> - Python: [https://python.org/downloads](https://python.org/downloads) → en Mac/Linux suele venir instalado.
-
----
-
-## Guía paso a paso
-
-### 1. Descargar el proyecto
-
-Si ya tienes la carpeta `garmin-stats` en tu ordenador, ábrela en la terminal:
+1. Clona el repo en la Pi y entra en la carpeta:
 
 ```bash
-cd ruta/donde/está/garmin-stats
+git clone https://github.com/RafaTatay/garming-stats.git
+cd garming-stats
 ```
 
-(Sustituye `ruta/donde/está/garmin-stats` por la ruta real, por ejemplo `/Users/tu-usuario/Documents/garmin-stats`.)
+2. Crea el archivo de credenciales (nunca lo subas a git):
+
+```bash
+cp .env.example .env
+```
+
+Edita `.env` y pon tu email y contraseña de Garmin Connect:
+
+```
+GARMIN_EMAIL=tu@email.com
+GARMIN_PASSWORD=tu_contraseña
+```
+
+3. Construye y arranca:
+
+```bash
+docker compose up -d --build
+```
+
+La primera sincronización puede tardar varios minutos. Las siguientes solo piden actividades nuevas.
+
+4. Conéctate a tu VPN y abre en el navegador:
+
+```
+http://<ip-de-la-pi>:8787
+```
+
+(Sustituye `<ip-de-la-pi>` por la IP de la Raspberry en la VPN.)
+
+### Comandos útiles en la Pi
+
+```bash
+# Ver logs (sync + servidor web)
+docker compose logs -f
+
+# Parar
+docker compose down
+
+# Reconstruir tras actualizar el código
+git pull
+docker compose up -d --build
+```
+
+Los JSON viven en **`public/data/`** del propio proyecto (bind mount). Si ya sincronizaste en el PC y copiaste esa carpeta a la Pi, Docker la usa tal cual.
+
+La sesión de Garmin se guarda en `data/garth/` (también en el disco de la Pi).
+
+El intervalo de sync se controla con `SYNC_INTERVAL_SECONDS` (por defecto `900` = 15 minutos) en `docker-compose.yml`.
+
+Si el sync falla con `Could not resolve host: sso.garmin.com`, el compose ya fija DNS a `1.1.1.1` / `8.8.8.8`. Recrea el contenedor: `docker compose up -d --force-recreate`.
 
 ---
 
-### 2. Configurar tus credenciales de Garmin
+## Desarrollo local (sin Docker)
 
-La app necesita tu email y contraseña de Garmin Connect para descargar tus actividades. **Nunca subas este archivo a internet.**
+Útil en el PC mientras programas. Necesitas **Node.js 18+** y **Python 3.10+**.
 
-1. Copia el archivo de ejemplo:
-  ```bash
-   cp .env.example .env
-  ```
-2. Abre `.env` con cualquier editor de texto y rellena tus datos:
-  ```
-   GARMIN_EMAIL=tu@email.com
-   GARMIN_PASSWORD=tu_contraseña
-  ```
-   Usa el mismo email y contraseña con los que entras en Garmin Connect.
+### 1. Credenciales
 
----
+```bash
+cp .env.example .env
+# Edita GARMIN_EMAIL y GARMIN_PASSWORD
+```
 
-### 3. Instalar dependencias de Python (sincronización)
-
-Entra en la carpeta `fetch` e instala las librerías necesarias:
+### 2. Dependencias de Python
 
 ```bash
 cd fetch
@@ -67,86 +100,46 @@ python3 -m pip install -r requirements.txt
 cd ..
 ```
 
-> Si `pip` no funciona, prueba con `python3 -m pip install -r requirements.txt` desde la carpeta `fetch`.
-
----
-
-### 4. Descargar tus actividades de Garmin
-
-Desde la carpeta raíz del proyecto (`garmin-stats`):
+### 3. Descargar actividades
 
 ```bash
-python3 fetch/sync.py --limit N
-```
+# Todas (o solo las nuevas si ya hay datos en public/data/)
+python3 fetch/sync.py
 
-**Qué hace este comando:**
-
-- Inicia sesión en Garmin Connect con tu `.env`
-- Descarga la lista de actividades y los detalles de cada una
-- Guarda todo en `public/data/` (archivos JSON)
-
-La primera vez puede tardar **varios minutos** si tienes muchas actividades. Verás el progreso en la terminal.
-
-**Opciones útiles:**
-
-```bash
-# Solo las 20 actividades más recientes (para probar)
+# Solo las 20 más recientes (prueba)
 python3 fetch/sync.py --limit 20
 
-# Solo actividades desde una fecha
+# Solo desde una fecha
 python3 fetch/sync.py --since 2024-01-01
 
-# Más rápido, sin descargar rutas GPS
+# Sin rutas GPS (más rápido)
 python3 fetch/sync.py --no-gpx
 ```
 
-> **Importante:** vuelve a ejecutar `python3 fetch/sync.py` cuando quieras actualizar los datos con entrenamientos nuevos. Las actividades ya descargadas no se vuelven a pedir a Garmin.
-
----
-
-### 5. Instalar dependencias de la app web
-
-En la carpeta raíz del proyecto:
+### 4. App web en modo desarrollo
 
 ```bash
 npm install
-```
-
-Solo hace falta hacerlo **una vez** (o cuando cambien las dependencias del proyecto).
-
----
-
-### 6. Abrir la app
-
-```bash
 npm run dev
 ```
 
-Verás algo como:
+Abre la URL que muestre Vite (por ejemplo [http://localhost:5173](http://localhost:5173)).
 
-```
-  ➜  Local:   http://localhost:5173/
-```
-
-Abre ese enlace en el navegador (Chrome, Firefox, Safari…).
-
-Para **cerrar** la app, vuelve a la terminal y pulsa `Ctrl + C`.
-
----
-
-## Resumen rápido (cuando ya lo hayas hecho una vez)
-
-Cada vez que quieras usar la app con datos actualizados:
+### Resumen rápido en local
 
 ```bash
-# 1. Sincronizar datos nuevos de Garmin
 python3 fetch/sync.py
-
-# 2. Arrancar la app
 npm run dev
 ```
 
-Luego abre [http://localhost:5173](http://localhost:5173) en el navegador.
+### Servir el build de producción en local
+
+```bash
+npm run build
+python3 fetch/serve.py
+```
+
+Abre [http://localhost:8787](http://localhost:8787).
 
 ---
 
@@ -158,7 +151,9 @@ En el menú lateral, entra en **Ajustes** para configurar:
 - FTP (ciclismo)
 - FC y ritmo en umbral (running)
 
-Estos valores se guardan en tu navegador y afectan a los cálculos de zonas, TSS y fitness.
+Estos valores se guardan en tu navegador (`localStorage`) y afectan a los cálculos de zonas, TSS y fitness.
+
+La lista de actividades se refresca sola cuando termina una sincronización en segundo plano (cada minuto comprueba si cambió `stats.json`).
 
 ---
 
@@ -166,32 +161,42 @@ Estos valores se guardan en tu navegador y afectan a los cálculos de zonas, TSS
 
 ### "ERROR: Set GARMIN_EMAIL and GARMIN_PASSWORD in .env"
 
-No existe el archivo `.env` o está vacío. Repite el **paso 2**.
+No existe el archivo `.env` o está vacío. Copia `.env.example` y rellénalo.
 
 ### "Authentication failed" al sincronizar
 
-- Comprueba que el email y la contraseña en `.env` son correctos.
-- Si tienes verificación en dos pasos (2FA) en Garmin, puede que falle el login automático. Prueba a desactivarla temporalmente o revisa la documentación de la librería `garminconnect`.
+- Comprueba email y contraseña.
+- Si tienes 2FA en Garmin, el login automático puede fallar. Prueba a desactivarla temporalmente o revisa la documentación de `garminconnect`.
 
-### "No se encontró /data/activities.json" en la app
+### "Sin datos de Garmin" / no aparecen actividades
 
-Aún no has sincronizado datos. Ejecuta primero:
+1. Comprueba que en la Pi exista `public/data/activities.json` (la carpeta que copiaste del PC).
+2. Recrea el contenedor para montar esa carpeta: `docker compose up -d --force-recreate`.
+3. Mira los logs: `docker compose logs -f`.
+4. Si el sync falla con DNS (`Could not resolve host: sso.garmin.com`), el compose ya usa DNS públicos; reinicia Docker o la Pi si sigue fallando.
+5. Tras actualizar el código: `git pull && docker compose up -d --build`.
+
+### `Could not resolve host: sso.garmin.com`
+
+El contenedor no resuelve DNS (frecuente en Raspberry Pi). El `docker-compose.yml` fija `1.1.1.1` y `8.8.8.8`. Aplica con:
 
 ```bash
-python3 fetch/sync.py
+docker compose up -d --force-recreate
 ```
 
-### La terminal dice que `node` o `npm` no existen
-
-Instala Node.js desde [nodejs.org](https://nodejs.org) y vuelve a abrir la terminal.
+Si sigue igual, prueba en el host: `ping sso.garmin.com`. Si el host tampoco resuelve, el problema es la red/DNS de la Pi, no de la app.
 
 ### La sincronización va muy lenta
 
-Es normal: hay una pausa entre peticiones para no saturar la API de Garmin. Para una prueba rápida usa `--limit 20` o `--no-gpx`.
+Es normal: hay pausas entre peticiones para no saturar la API de Garmin. En local, para una prueba usa `--limit 20` o `--no-gpx`.
 
-### Puerto 5173 ya en uso
+### Docker no arranca en la Pi / error con curl_cffi
 
-Cierra otras ventanas de terminal donde tengas `npm run dev` corriendo, o Vite te propondrá otro puerto (por ejemplo 5174).
+Usa **Raspberry Pi OS de 64 bits**. En 32 bits las ruedas de `curl_cffi` suelen faltar.
+
+### Puerto 8787 o 5173 ya en uso
+
+Cierra el otro proceso que lo esté usando, o cambia `PORT` / el mapeo en `docker-compose.yml`.
 
 ---
 
@@ -200,9 +205,10 @@ Cierra otras ventanas de terminal donde tengas `npm run dev` corriendo, o Vite t
 
 | Comando           | Descripción                                                |
 | ----------------- | ---------------------------------------------------------- |
-| `npm run build`   | Genera una versión optimizada en la carpeta `dist/`        |
-| `npm run preview` | Previsualiza la versión de producción (después de `build`) |
+| `npm run build`   | Genera la versión optimizada en `dist/`                    |
+| `npm run preview` | Previsualiza la build con Vite                             |
 | `npm run lint`    | Revisa el código con el linter                             |
+| `python3 fetch/serve.py` | Sirve `dist/` + `public/data/` en el puerto 8787    |
 
 
 ---
@@ -211,12 +217,16 @@ Cierra otras ventanas de terminal donde tengas `npm run dev` corriendo, o Vite t
 
 ```
 garmin-stats/
-├── .env                 ← Tus credenciales (no compartir)
+├── .env                 ← Credenciales (no compartir)
+├── Dockerfile
+├── docker-compose.yml
 ├── fetch/
-│   ├── sync.py          ← Script que descarga datos de Garmin
-│   └── requirements.txt ← Dependencias de Python
-├── public/data/         ← Datos descargados (JSON)
-└── src/                 ← Código de la app web (React)
+│   ├── sync.py          ← Descarga datos de Garmin
+│   ├── serve.py         ← Sirve la web + JSON en vivo
+│   ├── entrypoint.sh    ← Sync periódico + servidor (Docker)
+│   └── requirements.txt
+├── public/data/         ← JSON descargados (volumen en Docker)
+└── src/                 ← App web (React)
 ```
 
 ---
@@ -230,14 +240,16 @@ Estos archivos contienen datos personales o credenciales. El `.gitignore` ya los
 | `.env` | Email y contraseña de Garmin Connect | Acceso total a tu cuenta |
 | `public/data/` | Actividades, estadísticas y rutas GPS | Ubicación exacta, salud, hábitos |
 | `dist/data/` | Copia de los datos al hacer `npm run build` | Igual que arriba |
-| `~/.garth/` (en tu home) | Tokens de sesión de Garmin | Acceso a la API sin contraseña |
+| `~/.garth/` (o el volumen `garmin-garth`) | Tokens de sesión de Garmin | Acceso a la API sin contraseña |
 
 **Datos sensibles dentro de los JSON:**
+
 - Coordenadas GPS de cada entrenamiento (pueden revelar dónde vives o entrenas)
 - Ciudades en los títulos de actividades
 - FC, VO2max, calorías, ritmos y patrones horarios
 
 **Seguro para publicar:**
+
 - `.env.example` (solo tiene placeholders)
 - Todo el código en `src/` y `fetch/`
 
@@ -255,4 +267,3 @@ git rm --cached .env
 ```
 
 Luego haz commit de la eliminación. Si ya los subiste a GitHub, **cambia tu contraseña de Garmin** y considera borrar el historial del repositorio.
-
