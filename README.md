@@ -24,7 +24,7 @@ La forma recomendada: un contenedor que sirve la web y sincroniza Garmin **cada 
 1. Clona el repo en la Pi y entra en la carpeta:
 
 ```bash
-git clone https://github.com/RafaTatay/garming-stats.git
+git clone https://github.com/jopaso/garming-stats.git
 cd garming-stats
 ```
 
